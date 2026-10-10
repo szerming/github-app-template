@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local configuration: holds the real webhook secret. .env.example is committed.
+.env
