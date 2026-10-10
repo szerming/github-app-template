@@ -11,7 +11,7 @@ is reproducible and a silent upstream change fails loudly"):
 The published description is Octokit's OpenAPI 3.1 rendering of GitHub's webhook
 payloads (ADR 0002). Everything this script writes is derived from it:
 
-- the models, scoped to the shapes reachable from the deliveries in ``SCOPE``;
+- the models, scoped to the shapes reachable from the webhook request bodies;
 - the dispatch table, which the description cannot supply because it carries no
   ``discriminator`` and keys payloads by event+action, so the mapping is ours and
   is emitted here rather than hand-maintained beside the models.
@@ -56,15 +56,6 @@ UPSTREAM_DIGEST = "375906eeeace26486c6aecf5869a5e5ad4bba72c6571481ef54fa8c1cada3
 UPSTREAM_URL = (
     f"https://raw.githubusercontent.com/{UPSTREAM_REPOSITORY}"
     f"/{UPSTREAM_REVISION}/{UPSTREAM_PATH}"
-)
-
-# The deliveries this slice types (ticket #2). Ticket #3 removes the filter: the
-# command is the same, only this tuple grows to every published key.
-SCOPE: tuple[str, ...] = (
-    "push",
-    "pull-request-opened",
-    "pull-request-review-submitted",
-    "pull-request-closed",
 )
 
 # Formats that would make a model stricter than GitHub's own documentation.
@@ -117,8 +108,8 @@ def verify_digest(content: bytes, origin: str) -> str:
 
 
 @dataclass(frozen=True)
-class ScopedDelivery:
-    """One delivery in scope, and what the generated code needs to know about it."""
+class PublishedDelivery:
+    """One delivery from the description, and what the generated code needs."""
 
     webhook_key: str
     event_type: str
@@ -140,29 +131,28 @@ def dispatch_key(event_type: str, action: str | None) -> str:
     return f"{event_type}.{action}" if action else event_type
 
 
-def dispatch_facts(document: dict[str, Any]) -> dict[str, ScopedDelivery]:
-    """What the description says about each delivery in scope.
+def dispatch_facts(document: dict[str, Any]) -> dict[str, PublishedDelivery]:
+    """What the description says about each published delivery.
 
-    The event type is the value GitHub's own ``X-Github-Event`` header example
-    carries -- ``pull-request`` in the key is ``pull_request`` in the header --
-    and the action is the single value the payload schema enumerates, so both
-    come from the description rather than from a table kept beside it.
+    Every key the description carries is read, not a chosen subset: the artifact
+    types every delivery GitHub documents (spec 0001, user story 18). The event
+    type is the value GitHub's own ``X-Github-Event`` header example carries --
+    ``pull-request`` in the key is ``pull_request`` in the header -- and the
+    action is the single value the payload schema enumerates, so both come from
+    the description rather than from a table kept beside it.
     """
     webhooks = document.get("webhooks", {})
-    facts: dict[str, ScopedDelivery] = {}
-    for key in SCOPE:
-        if key not in webhooks:
-            raise SystemExit(
-                f"the published description has no {key!r} webhook: the pinned "
-                "revision no longer keys this delivery the way the scope assumes"
-            )
-        operation = webhooks[key].get("post")
+    if not webhooks:
+        raise SystemExit("the published description carries no webhooks: there is nothing to type")
+    facts: dict[str, PublishedDelivery] = {}
+    for key, item in webhooks.items():
+        operation = item.get("post")
         if not isinstance(operation, dict):
             raise SystemExit(f"the {key!r} webhook has no POST operation")
         event_type = _header_example(operation, "X-Github-Event")
         component = _request_body_ref(operation, key)
         action = _action_literal(document, component, key)
-        facts[key] = ScopedDelivery(
+        facts[key] = PublishedDelivery(
             webhook_key=key,
             event_type=event_type,
             action=action,
@@ -200,18 +190,49 @@ def _request_body_ref(operation: dict[str, Any], key: str) -> str:
 
 
 def _action_literal(document: dict[str, Any], component: str, key: str) -> str | None:
-    """The one value the payload's ``action`` enumerates, if it enumerates one."""
+    """The one value the payload's ``action`` enumerates, if it enumerates one.
+
+    A payload whose ``action`` the description leaves open -- ``repository_dispatch``
+    carries the caller's own event type -- has no literal to pin, and is keyed on
+    its event type alone.
+    """
     schema = document["components"]["schemas"][component]
-    action = schema.get("properties", {}).get("action")
-    if action is None:
+    values = _action_values(schema)
+    if values is None:
         return None
-    values = action.get("enum")
-    if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], str):
+    if len(values) != 1 or not isinstance(values[0], str):
         raise SystemExit(
             f"the {key!r} payload's action is not a single published value "
             f"({values!r}): a literal cannot be pinned to it"
         )
     return values[0]
+
+
+def _action_values(schema: dict[str, Any]) -> list[Any] | None:
+    """The values the payload's ``action`` enumerates, across any ``oneOf``.
+
+    ``None`` when the payload carries no ``action``, or one the description does
+    not enumerate. The branches of a ``oneOf`` have to agree: an action that
+    differed between them could not be pinned to a single literal.
+    """
+    properties: list[dict[str, Any]] = []
+    if isinstance(schema.get("properties"), dict):
+        properties.append(schema["properties"])
+    branches = schema.get("oneOf")
+    if isinstance(branches, list):
+        for branch in branches:
+            if isinstance(branch, dict) and isinstance(branch.get("properties"), dict):
+                properties.append(branch["properties"])
+    enumerated: list[Any] = []
+    for group in properties:
+        action = group.get("action")
+        if isinstance(action, dict) and isinstance(action.get("enum"), list):
+            enumerated.extend(action["enum"])
+    if not enumerated:
+        return None
+    # Deduplicate preserving order, so the two branches of a review-request
+    # schema agreeing on one value count once rather than reading as a conflict.
+    return list(dict.fromkeys(enumerated))
 
 
 def schema_closure(document: dict[str, Any], roots: Iterator[str]) -> set[str]:
@@ -252,10 +273,10 @@ def _refs(node: Any) -> Iterator[str]:
             yield from _refs(value)
 
 
-def scoped_document(
-    document: dict[str, Any], facts: Mapping[str, ScopedDelivery]
+def reduced_document(
+    document: dict[str, Any], facts: Mapping[str, PublishedDelivery]
 ) -> dict[str, Any]:
-    """The description reduced to the scoped deliveries' reachable shapes."""
+    """The description reduced to every delivery's reachable shapes."""
     schemas = document["components"]["schemas"]
     closure = schema_closure(document, (delivery.component for delivery in facts.values()))
     reduced = {
@@ -266,7 +287,37 @@ def scoped_document(
         # the dispatch table is emitted from the facts read above.
         "components": {"schemas": {name: schemas[name] for name in sorted(closure)}},
     }
+    _flatten_payload_unions(
+        reduced["components"]["schemas"], (delivery.component for delivery in facts.values())
+    )
     return _loosen(reduced)
+
+
+def _flatten_payload_unions(schemas: dict[str, Any], payloads: Iterator[str]) -> None:
+    """Give each ``oneOf`` *payload* schema the shape of one all-optional object.
+
+    Two review-request deliveries describe their payload as a ``oneOf`` of two
+    otherwise identical objects that differ only in which reviewer field they
+    carry. datamodel-codegen renders that as a ``RootModel`` union -- not an
+    ``Event``, and not a shape the dispatcher can build -- so the payload is
+    flattened to a single object whose fields are the union of the branches'.
+    Every field is optional anyway (ADR 0001), so keeping both reviewer fields is
+    the lens: the model types whichever one arrives. Only payload schemas are
+    flattened; a ``oneOf`` that is a field's own union type is left alone.
+    """
+    wanted = set(payloads)
+    for name in wanted:
+        schema = schemas[name]
+        branches = schema.get("oneOf")
+        if not isinstance(branches, list):
+            continue
+        properties: dict[str, Any] = {}
+        for branch in branches:
+            for field, subschema in (branch.get("properties") or {}).items():
+                properties.setdefault(field, subschema)
+        schema.pop("oneOf", None)
+        schema["type"] = "object"
+        schema["properties"] = properties
 
 
 def _loosen(node: Any) -> Any:
@@ -330,15 +381,17 @@ def generate_models(document: dict[str, Any]) -> str:
     return code
 
 
-_ACTION_FIELD = "    action: str | None = None"
+_ACTION_ANNOTATION = "    action: str | None"
 
 
-def pin_actions(code: str, facts: Mapping[str, ScopedDelivery]) -> str:
+def pin_actions(code: str, facts: Mapping[str, PublishedDelivery]) -> str:
     """Tighten ``action`` to its literal on each event+action model.
 
-    Deterministic and checked: a class the description no longer produces, or a
-    field line it no longer emits, fails the rebuild instead of quietly leaving
-    the action a bare string.
+    Deterministic and checked: a class the description no longer produces, or an
+    ``action`` field line it no longer emits, fails the rebuild instead of
+    quietly leaving the action a bare string. Only the annotation is rewritten,
+    so a field that carries a description -- ``action: str | None = Field(None,
+    description=...)`` -- is pinned exactly like a bare one.
     """
     wanted = {
         delivery.class_name: delivery.action
@@ -352,15 +405,18 @@ def pin_actions(code: str, facts: Mapping[str, ScopedDelivery]) -> str:
         if line.startswith("class "):
             current = line[len("class ") :].split("(", 1)[0].strip()
             continue
-        if current is not None and current in wanted and line.rstrip() == _ACTION_FIELD:
-            lines[index] = f'    action: Literal["{wanted[current]}"] | None = None'
+        if current is not None and current in wanted and line.startswith(_ACTION_ANNOTATION):
+            lines[index] = (
+                f'    action: Literal["{wanted[current]}"] | None'
+                + line[len(_ACTION_ANNOTATION) :]
+            )
             pinned.add(current)
     unpinned = sorted(set(wanted) - pinned)
     if unpinned:
         raise SystemExit(
             "the action could not be pinned on "
             + ", ".join(unpinned)
-            + f": no {_ACTION_FIELD.strip()!r} line was found in the generated class"
+            + f": no {_ACTION_ANNOTATION.strip()!r} field was found in the generated class"
         )
     return _ensure_import("\n".join(lines) + "\n", "Literal")
 
@@ -378,7 +434,7 @@ def _ensure_import(code: str, name: str) -> str:
     return code[: match.start()] + f"from typing import {', '.join(sorted(names))}" + code[match.end() :]
 
 
-def dispatch_table(facts: Mapping[str, ScopedDelivery]) -> str:
+def dispatch_table(facts: Mapping[str, PublishedDelivery]) -> str:
     """The registry, emitted beside the models so the two cannot drift."""
     rows = "\n".join(
         f'    "{delivery.dispatch_key}": {delivery.class_name},'
@@ -391,7 +447,7 @@ def dispatch_table(facts: Mapping[str, ScopedDelivery]) -> str:
     )
 
 
-def assert_classes_exist(code: str, facts: Mapping[str, ScopedDelivery]) -> None:
+def assert_classes_exist(code: str, facts: Mapping[str, PublishedDelivery]) -> None:
     for delivery in facts.values():
         if f"class {delivery.class_name}(" not in code:
             raise SystemExit(
@@ -400,12 +456,14 @@ def assert_classes_exist(code: str, facts: Mapping[str, ScopedDelivery]) -> None
             )
 
 
-def render(code: str, facts: Mapping[str, ScopedDelivery], digest: str) -> str:
+def render(code: str, facts: Mapping[str, PublishedDelivery], digest: str) -> str:
     """The committed artifact: provenance, the models, the dispatch table."""
     body = _strip_codegen_header(code)
-    summary = ", ".join(
-        f"{delivery.webhook_key} -> {delivery.dispatch_key} ({delivery.class_name})"
-        for delivery in sorted(facts.values(), key=lambda delivery: delivery.webhook_key)
+    event_types = {delivery.event_type for delivery in facts.values()}
+    dispatch_keys = {delivery.dispatch_key for delivery in facts.values()}
+    summary = (
+        f"every published delivery -- {len(facts)} webhook keys across "
+        f"{len(event_types)} event types, {len(dispatch_keys)} dispatch entries"
     )
     header = (
         '"""The generated payload models, and the dispatch table that selects one.\n'
@@ -436,7 +494,7 @@ def _strip_codegen_header(code: str) -> str:
 
 def rebuild(document: dict[str, Any], digest: str) -> str:
     facts = dispatch_facts(document)
-    code = generate_models(scoped_document(document, facts))
+    code = generate_models(reduced_document(document, facts))
     code = pin_actions(code, facts)
     assert_classes_exist(code, facts)
     return render(code, facts, digest)

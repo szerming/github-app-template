@@ -40,6 +40,10 @@ DELIVERY_ID_HEADER = "X-GitHub-Delivery"
 EVENT_TYPE_HEADER = "X-GitHub-Event"
 JSON_CONTENT_TYPE = "application/json"
 
+# An event type no revision of the description carries, to exercise the permanent
+# fallback: the Unmodelled Event, which is not a stub.
+UNDOCUMENTED_EVENT_TYPE = "an_event_github_does_not_document"
+
 READY_DEADLINE_SECONDS = 20.0
 
 # --- vendored artifacts ------------------------------------------------------
@@ -70,12 +74,18 @@ def example_payload(entry: dict[str, Any]) -> bytes:
     return (EXAMPLE_ROOT / entry["path"]).read_bytes()
 
 
-def example_entry(webhook_key: str) -> dict[str, Any]:
-    """The published example the manifest holds for one webhook key."""
+def example_entry(event_type: str, action: str | None = None) -> dict[str, Any]:
+    """The published example for one delivery, by the event header it arrives under.
+
+    GitHub publishes an event with no action as ``<event>/payload.json`` and each
+    event+action as ``<event>/<action>.payload.json``, so the file is named by the
+    same two values the registry is keyed on rather than by a table beside it.
+    """
+    wanted = f"{event_type}/{action}.payload.json" if action else f"{event_type}/payload.json"
     for entry in example_manifest()["examples"]:
-        if entry["webhook_key"] == webhook_key:
+        if entry["path"] == wanted:
             return entry
-    raise KeyError(f"no vendored example payload for {webhook_key!r}")
+    raise KeyError(f"no vendored example payload for {wanted!r}")
 
 
 def delivery_of(entry: dict[str, Any]) -> tuple[str, str | None]:

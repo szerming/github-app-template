@@ -12,6 +12,7 @@ from conftest import (
     JSON_CONTENT_TYPE,
     LEGACY_SIGNATURE_HEADER,
     SIGNATURE_HEADER,
+    UNDOCUMENTED_EVENT_TYPE,
     WEBHOOK_SECRET,
     Service,
     delivery_of,
@@ -81,14 +82,14 @@ def test_published_signature_vector_is_recomputed_and_accepted(service: Service)
 
 def test_a_signed_delivery_is_answered_202_naming_the_delivery(service: Service) -> None:
     status, acknowledgement = service.deliver(
-        issue_payload(), event_type="issues", delivery_id="accepted-1"
+        issue_payload(), event_type=UNDOCUMENTED_EVENT_TYPE, delivery_id="accepted-1"
     )
 
     assert status == 202
     assert acknowledgement["delivery_id"] == "accepted-1"
-    assert acknowledgement["event_type"] == "issues"
+    assert acknowledgement["event_type"] == UNDOCUMENTED_EVENT_TYPE
     assert acknowledgement["action"] == "opened"
-    # An event type outside the modelled scope: the permanent fallback, not a stub.
+    # An event type the models do not carry: the permanent fallback, not a stub.
     assert acknowledgement["modelled"] is False
     # No timestamp: a response a test can assert exactly.
     assert "timestamp" not in acknowledgement
@@ -104,36 +105,56 @@ def test_the_acknowledgement_omits_the_action_when_there_is_none(service: Servic
     assert "action" not in acknowledgement
 
 
-def test_every_published_example_arrives_typed(service: Service) -> None:
-    """The four deliveries this slice types, sent as GitHub publishes them."""
+def test_every_published_example_arrives_typed_or_recorded_unmodelled(
+    service: Service,
+) -> None:
+    """Every published example, sent as GitHub publishes it, over the wire.
+
+    Each arrives under the event header its directory names and the action its
+    payload carries -- the two values the registry is keyed on -- so a delivery
+    the models cover is logged as its typed event and one they do not is recorded
+    unmodelled. Neither is ever refused, and the counts are asserted end to end.
+    """
+    module = rebuild_module()
+    facts = module.dispatch_facts(description())
+    by_key = {fact.dispatch_key: fact for fact in facts.values()}
     entries = example_manifest()["examples"]
-    assert entries
-    facts = rebuild_module().dispatch_facts(description())
+    typed = unmodelled = 0
 
     for entry in entries:
-        event_type, _ = delivery_of(entry)
-        delivery_id = f"typed-{entry['webhook_key']}"
+        event_type, action = delivery_of(entry)
+        delivery_id = f"example-{entry['path']}"
         status, acknowledgement = service.deliver(
             example_payload(entry), event_type=event_type, delivery_id=delivery_id
         )
 
         assert status == 202, entry["path"]
-        assert acknowledgement["modelled"] is True, entry["path"]
-
         records = service.accepted_for(delivery_id)
         assert len(records) == 1, entry["path"]
-        assert records[0]["modelled"] is True
+        assert acknowledgement["modelled"] is records[0]["modelled"], entry["path"]
         assert records[0]["event_type"] == event_type
-        # Logged as its typed event: the class the description implies, and the
-        # payload it was typed from.
-        assert records[0]["model"] == facts[entry["webhook_key"]].class_name
         assert records[0]["payload"] == json.loads(example_payload(entry))
+
+        key = module.dispatch_key(event_type, action)
+        fact = by_key.get(key)
+        if records[0]["modelled"]:
+            # Nothing is typed as a model that does not cover its event+action,
+            # and the class named is the one the description implies.
+            assert fact is not None, f"{entry['path']} typed with no key {key!r}"
+            assert records[0]["model"] == fact.class_name, entry["path"]
+            typed += 1
+        else:
+            assert "model" not in records[0], entry["path"]
+            unmodelled += 1
+
+    assert typed + unmodelled == len(entries)
+    assert typed, "no published example arrived typed"
 
 
 def test_a_delivery_outside_the_typed_events_is_logged_raw(service: Service) -> None:
     body = issue_payload(number=2024)
     status, acknowledgement = service.deliver(
-        body, event_type="issues", delivery_id="unmodelled-1"
+        body, event_type=UNDOCUMENTED_EVENT_TYPE, delivery_id="unmodelled-1"
     )
 
     assert status == 202
@@ -348,14 +369,16 @@ def test_a_body_that_is_not_json_is_accepted_and_logged_raw(service: Service) ->
 
 def test_exactly_one_log_record_per_delivery_carrying_the_payload(service: Service) -> None:
     body = issue_payload(number=42)
-    status, _ = service.deliver(body, event_type="issues", delivery_id="log-1")
+    status, _ = service.deliver(
+        body, event_type=UNDOCUMENTED_EVENT_TYPE, delivery_id="log-1"
+    )
 
     assert status == 202
     records = service.accepted_for("log-1")
     assert len(records) == 1
 
     record = records[0]
-    assert record["event_type"] == "issues"
+    assert record["event_type"] == UNDOCUMENTED_EVENT_TYPE
     assert record["action"] == "opened"
     assert record["sender"] == "octocat"
     assert record["repository"] == "octo/hello-world"
