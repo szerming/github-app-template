@@ -1,8 +1,16 @@
 """The rebuild command: the pin, the provenance, and reproducibility.
 
 The artifact has to be reconstructible by anyone who has the description it
-names, so these run the command itself -- the same entry point the operator runs,
-through the same generator, minus the network -- and read what it wrote.
+names, so these run the command itself -- the wrapper the operator runs, through
+the same generator, minus the network -- and read what it wrote.
+
+A note on the seam, because spec 0001 says its seams are settled and there are
+two: those two are the running service and the models package, and they carry the
+wire and the typing. Neither can carry the claims that are about the *build* -- that
+the command verifies the digest of the description it pins, that the artifact is
+what that description produces, and that two runs agree byte for byte. Those are
+observable only by running the command and comparing what it wrote, which is what
+this module does, and it stays off the network by reading the vendored copy.
 """
 
 from __future__ import annotations
@@ -10,14 +18,19 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-import sys
 
-from conftest import DESCRIPTION_PATH, GENERATED_MODULE_PATH, REBUILD_SCRIPT, rebuild_module
+from conftest import (
+    DESCRIPTION_PATH,
+    GENERATED_MODULE_PATH,
+    REBUILD_COMMAND,
+    rebuild_module,
+)
 
 
 def rebuild(*args: str) -> subprocess.CompletedProcess[str]:
+    """The operator's one command, so the path run by hand is the path covered."""
     return subprocess.run(
-        [sys.executable, str(REBUILD_SCRIPT), *args],
+        ["bash", str(REBUILD_COMMAND), *args],
         capture_output=True,
         text=True,
         timeout=300,

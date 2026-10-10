@@ -40,8 +40,10 @@ import hashlib
 import json
 import re
 import urllib.request
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DESCRIPTION_PATH = REPO_ROOT / "vendor" / "openapi-webhooks" / "api.github.com.json"
@@ -87,7 +89,7 @@ def class_name(component: str) -> str:
 
 def fetch_description() -> bytes:
     """The published description at the pinned revision, as bytes."""
-    with urllib.request.urlopen(UPSTREAM_URL, timeout=60) as response:  # noqa: S310
+    with urllib.request.urlopen(UPSTREAM_URL, timeout=60) as response:
         return bytes(response.read())
 
 
@@ -114,16 +116,40 @@ def verify_digest(content: bytes, origin: str) -> str:
     return digest
 
 
-def model_stem(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """The dispatch facts for each scoped delivery, read from the description.
+@dataclass(frozen=True)
+class ScopedDelivery:
+    """One delivery in scope, and what the generated code needs to know about it."""
+
+    webhook_key: str
+    event_type: str
+    action: str | None
+    component: str
+    class_name: str
+    dispatch_key: str
+
+
+def dispatch_key(event_type: str, action: str | None) -> str:
+    """The registry key for a delivery: its event header plus its action.
+
+    The models package builds the same key at runtime from the same two values
+    (``github_webhooks.models.registry``); the two cannot call each other -- the
+    build tool cannot import the service, and the service must not import its
+    build tool -- so the format is written twice and held together by a test that
+    derives each key from the description and looks it up in the registry.
+    """
+    return f"{event_type}.{action}" if action else event_type
+
+
+def dispatch_facts(document: dict[str, Any]) -> dict[str, ScopedDelivery]:
+    """What the description says about each delivery in scope.
 
     The event type is the value GitHub's own ``X-Github-Event`` header example
     carries -- ``pull-request`` in the key is ``pull_request`` in the header --
     and the action is the single value the payload schema enumerates, so both
-    come from the description rather than from a table beside it.
+    come from the description rather than from a table kept beside it.
     """
     webhooks = document.get("webhooks", {})
-    stem: dict[str, dict[str, Any]] = {}
+    facts: dict[str, ScopedDelivery] = {}
     for key in SCOPE:
         if key not in webhooks:
             raise SystemExit(
@@ -136,16 +162,16 @@ def model_stem(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
         event_type = _header_example(operation, "X-Github-Event")
         component = _request_body_ref(operation, key)
         action = _action_literal(document, component, key)
-        dispatch = f"{event_type}.{action}" if action else event_type
-        stem[key] = {
-            "webhook_key": key,
-            "event_type": event_type,
-            "action": action,
-            "component": component,
-            "class_name": class_name(component),
-            "dispatch_key": dispatch,
-        }
-    return stem
+        facts[key] = ScopedDelivery(
+            webhook_key=key,
+            event_type=event_type,
+            action=action,
+            component=component,
+            class_name=class_name(component),
+            dispatch_key=dispatch_key(event_type, action),
+        )
+    return facts
+
 
 
 def _header_example(operation: dict[str, Any], name: str) -> str:
@@ -226,10 +252,12 @@ def _refs(node: Any) -> Iterator[str]:
             yield from _refs(value)
 
 
-def scoped_document(document: dict[str, Any], stem: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def scoped_document(
+    document: dict[str, Any], facts: Mapping[str, ScopedDelivery]
+) -> dict[str, Any]:
     """The description reduced to the scoped deliveries' reachable shapes."""
     schemas = document["components"]["schemas"]
-    closure = schema_closure(document, (facts["component"] for facts in stem.values()))
+    closure = schema_closure(document, (delivery.component for delivery in facts.values()))
     reduced = {
         "openapi": document["openapi"],
         "info": document["info"],
@@ -289,7 +317,8 @@ def generate_models(document: dict[str, Any]) -> str:
         # that GitHub's own example payloads omit (ADR 0001).
         force_optional_for_required_fields=True,
         extra_fields="allow",
-        # Timestamps as timezone-aware datetimes; no URL types and no enums.
+        # Reproducible output: datamodel-codegen would otherwise stamp the file
+        # header with the time it ran.
         disable_timestamp=True,
         target_python_version="3.13",
         base_class="github_webhooks.models.events.Event",
@@ -304,7 +333,7 @@ def generate_models(document: dict[str, Any]) -> str:
 _ACTION_FIELD = "    action: str | None = None"
 
 
-def pin_actions(code: str, stem: dict[str, dict[str, Any]]) -> str:
+def pin_actions(code: str, facts: Mapping[str, ScopedDelivery]) -> str:
     """Tighten ``action`` to its literal on each event+action model.
 
     Deterministic and checked: a class the description no longer produces, or a
@@ -312,9 +341,9 @@ def pin_actions(code: str, stem: dict[str, dict[str, Any]]) -> str:
     the action a bare string.
     """
     wanted = {
-        facts["class_name"]: facts["action"]
-        for facts in stem.values()
-        if facts["action"] is not None
+        delivery.class_name: delivery.action
+        for delivery in facts.values()
+        if delivery.action is not None
     }
     lines = code.splitlines()
     current: str | None = None
@@ -349,11 +378,11 @@ def _ensure_import(code: str, name: str) -> str:
     return code[: match.start()] + f"from typing import {', '.join(sorted(names))}" + code[match.end() :]
 
 
-def dispatch_table(stem: dict[str, dict[str, Any]]) -> str:
+def dispatch_table(facts: Mapping[str, ScopedDelivery]) -> str:
     """The registry, emitted beside the models so the two cannot drift."""
     rows = "\n".join(
-        f'    "{facts["dispatch_key"]}": {facts["class_name"]},'
-        for facts in sorted(stem.values(), key=lambda facts: facts["dispatch_key"])
+        f'    "{delivery.dispatch_key}": {delivery.class_name},'
+        for delivery in sorted(facts.values(), key=lambda delivery: delivery.dispatch_key)
     )
     return (
         "\n\nDISPATCH: dict[str, type[Event]] = {\n"
@@ -362,21 +391,21 @@ def dispatch_table(stem: dict[str, dict[str, Any]]) -> str:
     )
 
 
-def assert_classes_exist(code: str, stem: dict[str, dict[str, Any]]) -> None:
-    for facts in stem.values():
-        if f"class {facts['class_name']}(" not in code:
+def assert_classes_exist(code: str, facts: Mapping[str, ScopedDelivery]) -> None:
+    for delivery in facts.values():
+        if f"class {delivery.class_name}(" not in code:
             raise SystemExit(
-                f"the generated module has no {facts['class_name']}: generation "
+                f"the generated module has no {delivery.class_name}: generation "
                 "renamed the class the dispatch table points at"
             )
 
 
-def render(code: str, stem: dict[str, dict[str, Any]], digest: str) -> str:
+def render(code: str, facts: Mapping[str, ScopedDelivery], digest: str) -> str:
     """The committed artifact: provenance, the models, the dispatch table."""
     body = _strip_codegen_header(code)
     summary = ", ".join(
-        f"{facts['webhook_key']} -> {facts['dispatch_key']} ({facts['class_name']})"
-        for facts in sorted(stem.values(), key=lambda facts: facts["webhook_key"])
+        f"{delivery.webhook_key} -> {delivery.dispatch_key} ({delivery.class_name})"
+        for delivery in sorted(facts.values(), key=lambda delivery: delivery.webhook_key)
     )
     header = (
         '"""The generated payload models, and the dispatch table that selects one.\n'
@@ -395,7 +424,7 @@ def render(code: str, stem: dict[str, dict[str, Any]], digest: str) -> str:
         "\n"
     )
     body = body.replace("from __future__ import annotations\n", "", 1)
-    return header + body.lstrip("\n") + dispatch_table(stem)
+    return header + body.lstrip("\n") + dispatch_table(facts)
 
 
 def _strip_codegen_header(code: str) -> str:
@@ -406,11 +435,11 @@ def _strip_codegen_header(code: str) -> str:
 
 
 def rebuild(document: dict[str, Any], digest: str) -> str:
-    stem = model_stem(document)
-    code = generate_models(scoped_document(document, stem))
-    code = pin_actions(code, stem)
-    assert_classes_exist(code, stem)
-    return render(code, stem, digest)
+    facts = dispatch_facts(document)
+    code = generate_models(scoped_document(document, facts))
+    code = pin_actions(code, facts)
+    assert_classes_exist(code, facts)
+    return render(code, facts, digest)
 
 
 # --------------------------------------------------------------------------- #

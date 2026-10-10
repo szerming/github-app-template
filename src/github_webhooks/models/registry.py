@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from .events import Event, UnmodelledEvent
 from .generated import DISPATCH
 
-REGISTRY: dict[str, type[Event]] = dict(DISPATCH)
+REGISTRY: dict[str, type[Event]] = DISPATCH
 
 
 def dispatch_key(event_type: str, action: str | None) -> str:
@@ -29,15 +29,17 @@ def parse_event(event_type: str, action: str | None, payload: Any) -> Event:
     The single front door (spec 0001): the handler uses it to produce the log
     record, and whatever comes next will use it instead.
 
-    Both the fallback paths are the lens rather than a gate (ADR 0001): an event
-    type with no model, a body that is not a JSON object, and a payload the model
-    cannot type are all the same outcome -- accepted, raw payload retained,
-    ``modelled`` false -- because a refused delivery is a lost one.
+    Both fallback paths are the lens rather than a gate (ADR 0001) -- a refused
+    delivery is a lost one -- so neither a key with no model, nor a payload that is
+    not a JSON object, nor a payload a model cannot type ever raises. A payload a
+    model did try to type carries the error it raised, so the caller can log a
+    shape the models cannot type differently from an event type they do not cover
+    (spec 0001, user stories 26 and 32).
     """
     model = REGISTRY.get(dispatch_key(event_type, action))
     if model is None or not isinstance(payload, dict):
         return UnmodelledEvent(payload=payload)
     try:
         return model(**payload)
-    except ValidationError:
-        return UnmodelledEvent(payload=payload)
+    except ValidationError as error:
+        return UnmodelledEvent(payload=payload, validation_error=str(error))

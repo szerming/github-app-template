@@ -11,7 +11,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from . import signing
-from .models import parse_event
+from .models import UnmodelledEvent, parse_event
 from .settings import Settings, load_settings
 
 DELIVERY_ID_HEADER = "X-GitHub-Delivery"
@@ -22,6 +22,11 @@ EVENT_TYPE_HEADER = "X-GitHub-Event"
 REJECTED_LEGACY_SHA1 = "legacy-sha1-signature"
 REJECTED_INVALID_SIGNATURE = "invalid-signature"
 REJECTED_NON_JSON_CONTENT_TYPE = "non-json-content-type"
+
+# A delivery that was accepted but that no model could type. Not a refusal, and
+# logged as its own warning so that a shape the models do not cover is visible
+# without reading the payload: a schema gap, not an unmodelled event type.
+UNMODELLED_VALIDATION_FAILED = "validation-failed"
 
 
 class Acknowledgement(BaseModel):
@@ -44,6 +49,11 @@ def _compact(value: Any) -> str:
 
 def _log_refusal(rejected: str, **fields: Any) -> None:
     logger.warning("{}", _compact({"rejected": rejected, **fields}))
+
+
+def _log_unmodelled(unmodelled: str, **fields: Any) -> None:
+    """The accepted-but-untyped path: a warning, but never a refusal."""
+    logger.warning("{}", _compact({"unmodelled": unmodelled, **fields}))
 
 
 def _log_delivery(record: dict[str, Any]) -> None:
@@ -143,6 +153,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         action = payload.get("action") if isinstance(payload, dict) else None
         event = parse_event(event_type, action, payload)
 
+        # Logged before the record of the delivery: a shape the models could not
+        # type is the thing worth seeing, and it is logged with the error and the
+        # body it arrived in rather than being absorbed into the record below.
+        if isinstance(event, UnmodelledEvent) and event.validation_error is not None:
+            _log_unmodelled(
+                UNMODELLED_VALIDATION_FAILED,
+                delivery_id=delivery_id,
+                event_type=event_type,
+                error=event.validation_error,
+                raw_body=_raw_text(body),
+            )
+
         record: dict[str, Any] = {
             "delivery_id": delivery_id,
             "event_type": event_type,
@@ -152,6 +174,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         record["sender"] = _nested(payload, "sender", "login")
         record["repository"] = _nested(payload, "repository", "full_name")
         record["modelled"] = event.modelled
+        if event.modelled:
+            # The class the delivery was typed as, so "logged as its typed event"
+            # is readable from the record rather than inferred from the flag.
+            record["model"] = type(event).__name__
         # The payload is the product of V1: written even though nothing consumes
         # it yet. A body that is not JSON is logged raw rather than dropped.
         record["payload"] = payload if payload is not None else _raw_text(body)

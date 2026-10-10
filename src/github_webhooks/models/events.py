@@ -20,13 +20,20 @@ class Event(BaseModel):
 
 
 class UnmodelledEvent(Event):
-    """A delivery whose event type has no dedicated model.
+    """A delivery whose payload no model typed.
 
     The permanent fallback, not a stub: it is what happens to any event type the
-    models do not cover, for the life of the service. It carries the raw payload
-    so that a newly introduced GitHub event is visible rather than refused.
+    models do not cover, and to a payload they cover but cannot type, for the life
+    of the service. It carries the raw payload so that a newly introduced GitHub
+    event, or a field whose shape changed, is visible rather than refused.
     """
 
     modelled: ClassVar[bool] = False
 
     payload: Any = None
+
+    # Why the fallback was taken, when there was something to try: the validation
+    # error a model raised. ``None`` means no model covers this delivery's key,
+    # which is a different fact -- a shape the models cannot type rather than an
+    # event type they do not cover -- and the log has to tell them apart.
+    validation_error: str | None = None

@@ -47,6 +47,7 @@ READY_DEADLINE_SECONDS = 20.0
 DESCRIPTION_PATH = REPO_ROOT / "vendor" / "openapi-webhooks" / "api.github.com.json"
 GENERATED_MODULE_PATH = REPO_ROOT / "src" / "github_webhooks" / "models" / "generated.py"
 REBUILD_SCRIPT = REPO_ROOT / "scripts" / "rebuild_models.py"
+REBUILD_COMMAND = REPO_ROOT / "scripts" / "rebuild_models.sh"
 
 EXAMPLE_ROOT = REPO_ROOT / "tests" / "fixtures" / "example-payloads" / "api.github.com"
 EXAMPLE_MANIFEST_PATH = REPO_ROOT / "tests" / "fixtures" / "example-payloads" / "MANIFEST.json"
@@ -69,6 +70,14 @@ def example_payload(entry: dict[str, Any]) -> bytes:
     return (EXAMPLE_ROOT / entry["path"]).read_bytes()
 
 
+def example_entry(webhook_key: str) -> dict[str, Any]:
+    """The published example the manifest holds for one webhook key."""
+    for entry in example_manifest()["examples"]:
+        if entry["webhook_key"] == webhook_key:
+            return entry
+    raise KeyError(f"no vendored example payload for {webhook_key!r}")
+
+
 def delivery_of(entry: dict[str, Any]) -> tuple[str, str | None]:
     """The event header and the action a published example arrives under.
 
@@ -81,10 +90,6 @@ def delivery_of(entry: dict[str, Any]) -> tuple[str, str | None]:
     return event_type, action
 
 
-def dispatch_key(event_type: str, action: str | None) -> str:
-    return f"{event_type}.{action}" if action else event_type
-
-
 def rebuild_module() -> Any:
     """The generator, imported by path: one scope shared with the tests."""
     name = "rebuild_models_under_test"
@@ -93,8 +98,8 @@ def rebuild_module() -> Any:
     spec = importlib.util.spec_from_file_location(name, REBUILD_SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    # Registered before ``exec_module``: some generated shapes need the module
-    # to exist while it is being executed.
+    # Registered under its own name so it is a normal module to anything that
+    # resolves it back by name -- its dataclasses included.
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module

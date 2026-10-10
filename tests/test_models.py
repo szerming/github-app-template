@@ -17,7 +17,7 @@ from conftest import (
     GENERATED_MODULE_PATH,
     delivery_of,
     description,
-    dispatch_key,
+    example_entry,
     example_manifest,
     example_payload,
     rebuild_module,
@@ -25,7 +25,14 @@ from conftest import (
 )
 from pydantic import BaseModel, ValidationError
 
-from github_webhooks.models import REGISTRY, Event, UnmodelledEvent, generated, parse_event
+from github_webhooks.models import (
+    REGISTRY,
+    Event,
+    UnmodelledEvent,
+    dispatch_key,
+    generated,
+    parse_event,
+)
 
 # Shapes the pinned description publishes that no scoped delivery can reach. If
 # the scope ever widened to the whole document, these are what would appear.
@@ -67,20 +74,25 @@ def test_every_key_the_description_publishes_for_the_scoped_deliveries_has_an_en
     """The table is emitted beside the models, so a dropped key fails the build
     rather than being hand-maintained back into a file nobody regenerates."""
     module = rebuild_module()
-    stem = module.model_stem(description())
+    document = description()
+    facts = module.dispatch_facts(document)
 
-    assert set(stem) == set(module.SCOPE)
-    for facts in stem.values():
-        assert facts["dispatch_key"] in REGISTRY, facts["dispatch_key"]
-        assert issubclass(REGISTRY[facts["dispatch_key"]], Event)
+    # Every delivery in scope is one the description publishes, and each one it
+    # publishes resolves to an entry in the table the models package holds.
+    for key in module.SCOPE:
+        assert key in document["webhooks"], key
+
+    for delivery in facts.values():
+        assert delivery.dispatch_key in REGISTRY, delivery.dispatch_key
+        assert issubclass(REGISTRY[delivery.dispatch_key], Event)
 
 
 def test_the_artifact_carries_only_the_shapes_the_scoped_deliveries_reach():
     module = rebuild_module()
     document = description()
     schemas = document["components"]["schemas"]
-    stem = module.model_stem(document)
-    reachable = module.schema_closure(document, (facts["component"] for facts in stem.values()))
+    facts = module.dispatch_facts(document)
+    reachable = module.schema_closure(document, (delivery.component for delivery in facts.values()))
     artifact = GENERATED_MODULE_PATH.read_text(encoding="utf-8")
 
     # Every shape a scoped delivery can reach is in the artifact ...
@@ -118,22 +130,21 @@ def test_every_generated_field_is_optional():
 
 def test_a_payload_missing_the_fields_the_description_requires_still_validates():
     document = description()
-    stem = rebuild_module().model_stem(document)
+    facts = rebuild_module().dispatch_facts(document)
     by_key = {entry["webhook_key"]: entry for entry in examples()}
 
-    for facts in stem.values():
-        required = set(document["components"]["schemas"][facts["component"]].get("required", []))
-        assert required, f"the description requires nothing for {facts['webhook_key']}"
-        payload = json.loads(example_payload(by_key[facts["webhook_key"]]))
+    for delivery in facts.values():
+        required = set(document["components"]["schemas"][delivery.component].get("required", []))
+        assert required, f"the description requires nothing for {delivery.webhook_key}"
+        payload = json.loads(example_payload(by_key[delivery.webhook_key]))
         stripped = {name: value for name, value in payload.items() if name not in required}
 
-        assert REGISTRY[facts["dispatch_key"]](**stripped) is not None
+        assert REGISTRY[delivery.dispatch_key](**stripped) is not None
 
 
 def test_unknown_fields_are_retained():
     """A field GitHub adds is visible in the log before anyone models it."""
-    entry = next(entry for entry in examples() if entry["webhook_key"] == "push")
-    payload = json.loads(example_payload(entry))
+    payload = json.loads(example_payload(example_entry("push")))
     payload["a_field_github_has_not_documented"] = {"nested": True}
 
     event = parse_event("push", None, payload)
@@ -151,6 +162,10 @@ def test_a_payload_the_model_cannot_type_is_accepted_as_an_unmodelled_event():
     assert isinstance(event, UnmodelledEvent)
     assert event.modelled is False
     assert event.payload == payload
+    # A shape the models cannot type is a different fact from an event type they
+    # do not cover, and the caller is given the difference to log.
+    assert event.validation_error is not None
+    assert "WebhookPush" in event.validation_error
 
 
 def test_an_event_type_outside_the_scope_is_an_unmodelled_event():
@@ -161,6 +176,8 @@ def test_an_event_type_outside_the_scope_is_an_unmodelled_event():
     assert isinstance(event, UnmodelledEvent)
     assert event.modelled is False
     assert event.payload == payload
+    # No model was tried, so there is no error to report.
+    assert event.validation_error is None
 
 
 # --- the action is a literal, not a stringly-typed guess ---------------------
@@ -173,12 +190,12 @@ def test_the_action_is_pinned_to_its_literal_on_each_event_action_model():
     artifact = GENERATED_MODULE_PATH.read_text(encoding="utf-8")
     pinned = 0
 
-    for facts in module.model_stem(description()).values():
-        action = facts["action"]
+    for delivery in module.dispatch_facts(description()).values():
+        action = delivery.action
         if action is None:
             continue
         pinned += 1
-        model = REGISTRY[facts["dispatch_key"]]
+        model = REGISTRY[delivery.dispatch_key]
 
         assert typing.get_args(model.model_fields["action"].annotation) == (
             typing.Literal[action],

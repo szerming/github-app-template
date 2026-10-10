@@ -15,8 +15,11 @@ from conftest import (
     WEBHOOK_SECRET,
     Service,
     delivery_of,
+    description,
+    example_entry,
     example_manifest,
     example_payload,
+    rebuild_module,
     sign,
 )
 
@@ -105,6 +108,7 @@ def test_every_published_example_arrives_typed(service: Service) -> None:
     """The four deliveries this slice types, sent as GitHub publishes them."""
     entries = example_manifest()["examples"]
     assert entries
+    facts = rebuild_module().dispatch_facts(description())
 
     for entry in entries:
         event_type, _ = delivery_of(entry)
@@ -120,7 +124,9 @@ def test_every_published_example_arrives_typed(service: Service) -> None:
         assert len(records) == 1, entry["path"]
         assert records[0]["modelled"] is True
         assert records[0]["event_type"] == event_type
-        # The typed event is logged with the payload it was typed from.
+        # Logged as its typed event: the class the description implies, and the
+        # payload it was typed from.
+        assert records[0]["model"] == facts[entry["webhook_key"]].class_name
         assert records[0]["payload"] == json.loads(example_payload(entry))
 
 
@@ -137,6 +143,45 @@ def test_a_delivery_outside_the_typed_events_is_logged_raw(service: Service) -> 
     assert len(records) == 1
     assert records[0]["modelled"] is False
     assert records[0]["payload"] == json.loads(body)
+    # No model was tried, so none is named, and this is not a validation failure.
+    assert "model" not in records[0]
+    assert [
+        record
+        for record in service.refused()
+        if record.get("delivery_id") == "unmodelled-1"
+    ] == []
+
+
+def test_a_payload_a_model_cannot_type_is_accepted_and_warned_about(service: Service) -> None:
+    """A gap in the models is a log line, not a lost delivery (spec 0001, story 26).
+
+    The delivery is acknowledged like any other, and the record says it was not
+    typed; the warning is what separates "the model rejected this payload" from
+    "no model covers this event type".
+    """
+    payload = json.loads(example_payload(example_entry("push")))
+    payload["commits"] = "not the array the model expects"
+    body = json.dumps(payload).encode("utf-8")
+
+    status, acknowledgement = service.deliver(body, event_type="push", delivery_id="gap-1")
+
+    assert status == 202
+    assert acknowledgement["modelled"] is False
+
+    # The raw body is all that is left of a delivery no model could type, so it
+    # is in the warning and in the record.
+    warnings = [
+        record for record in service.refused() if record.get("delivery_id") == "gap-1"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["unmodelled"] == "validation-failed"
+    assert "WebhookPush" in warnings[0]["error"]
+    assert warnings[0]["raw_body"] == body.decode()
+
+    records = service.accepted_for("gap-1")
+    assert len(records) == 1
+    assert records[0]["modelled"] is False
+    assert records[0]["payload"] == payload
 
 
 # --- refusal ----------------------------------------------------------------
