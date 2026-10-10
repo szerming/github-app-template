@@ -3,6 +3,11 @@
 Nothing here imports the application's internals. The tests assert only what the
 outside shows -- HTTP status codes and the lines the process logs -- so they
 survive any refactor of the handler.
+
+The vendored artifacts the tests read live here too, loaded once: the pinned
+description the models are generated from, the published example payloads, and
+the generator itself, so the tests and the rebuild command share one scope
+rather than keeping two copies of it.
 """
 
 from __future__ import annotations
@@ -10,10 +15,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import http.client
+import importlib.util
 import json
 import os
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -34,6 +41,64 @@ EVENT_TYPE_HEADER = "X-GitHub-Event"
 JSON_CONTENT_TYPE = "application/json"
 
 READY_DEADLINE_SECONDS = 20.0
+
+# --- vendored artifacts ------------------------------------------------------
+
+DESCRIPTION_PATH = REPO_ROOT / "vendor" / "openapi-webhooks" / "api.github.com.json"
+GENERATED_MODULE_PATH = REPO_ROOT / "src" / "github_webhooks" / "models" / "generated.py"
+REBUILD_SCRIPT = REPO_ROOT / "scripts" / "rebuild_models.py"
+
+EXAMPLE_ROOT = REPO_ROOT / "tests" / "fixtures" / "example-payloads" / "api.github.com"
+EXAMPLE_MANIFEST_PATH = REPO_ROOT / "tests" / "fixtures" / "example-payloads" / "MANIFEST.json"
+
+
+def sha256(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def description() -> dict[str, Any]:
+    """The vendored description: what the artifact is generated from."""
+    return json.loads(DESCRIPTION_PATH.read_text(encoding="utf-8"))
+
+
+def example_manifest() -> dict[str, Any]:
+    return json.loads(EXAMPLE_MANIFEST_PATH.read_text(encoding="utf-8"))
+
+
+def example_payload(entry: dict[str, Any]) -> bytes:
+    return (EXAMPLE_ROOT / entry["path"]).read_bytes()
+
+
+def delivery_of(entry: dict[str, Any]) -> tuple[str, str | None]:
+    """The event header and the action a published example arrives under.
+
+    Both come from the fixture rather than from a table beside it: GitHub
+    publishes each example in a directory named after the event header, and the
+    action is what the payload itself carries.
+    """
+    event_type = entry["path"].split("/", 1)[0]
+    action = json.loads(example_payload(entry)).get("action")
+    return event_type, action
+
+
+def dispatch_key(event_type: str, action: str | None) -> str:
+    return f"{event_type}.{action}" if action else event_type
+
+
+def rebuild_module() -> Any:
+    """The generator, imported by path: one scope shared with the tests."""
+    name = "rebuild_models_under_test"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, REBUILD_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # Registered before ``exec_module``: some generated shapes need the module
+    # to exist while it is being executed.
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
 
 
 def sign(secret: str, body: bytes) -> str:

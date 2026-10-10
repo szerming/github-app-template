@@ -14,6 +14,9 @@ from conftest import (
     SIGNATURE_HEADER,
     WEBHOOK_SECRET,
     Service,
+    delivery_of,
+    example_manifest,
+    example_payload,
     sign,
 )
 
@@ -82,7 +85,7 @@ def test_a_signed_delivery_is_answered_202_naming_the_delivery(service: Service)
     assert acknowledgement["delivery_id"] == "accepted-1"
     assert acknowledgement["event_type"] == "issues"
     assert acknowledgement["action"] == "opened"
-    # Nothing is typed yet, and that is the permanent fallback, not a stub.
+    # An event type outside the modelled scope: the permanent fallback, not a stub.
     assert acknowledgement["modelled"] is False
     # No timestamp: a response a test can assert exactly.
     assert "timestamp" not in acknowledgement
@@ -94,8 +97,46 @@ def test_the_acknowledgement_omits_the_action_when_there_is_none(service: Servic
     )
 
     assert status == 202
-    assert acknowledgement["modelled"] is False
+    assert acknowledgement["modelled"] is True
     assert "action" not in acknowledgement
+
+
+def test_every_published_example_arrives_typed(service: Service) -> None:
+    """The four deliveries this slice types, sent as GitHub publishes them."""
+    entries = example_manifest()["examples"]
+    assert entries
+
+    for entry in entries:
+        event_type, _ = delivery_of(entry)
+        delivery_id = f"typed-{entry['webhook_key']}"
+        status, acknowledgement = service.deliver(
+            example_payload(entry), event_type=event_type, delivery_id=delivery_id
+        )
+
+        assert status == 202, entry["path"]
+        assert acknowledgement["modelled"] is True, entry["path"]
+
+        records = service.accepted_for(delivery_id)
+        assert len(records) == 1, entry["path"]
+        assert records[0]["modelled"] is True
+        assert records[0]["event_type"] == event_type
+        # The typed event is logged with the payload it was typed from.
+        assert records[0]["payload"] == json.loads(example_payload(entry))
+
+
+def test_a_delivery_outside_the_typed_events_is_logged_raw(service: Service) -> None:
+    body = issue_payload(number=2024)
+    status, acknowledgement = service.deliver(
+        body, event_type="issues", delivery_id="unmodelled-1"
+    )
+
+    assert status == 202
+    assert acknowledgement["modelled"] is False
+
+    records = service.accepted_for("unmodelled-1")
+    assert len(records) == 1
+    assert records[0]["modelled"] is False
+    assert records[0]["payload"] == json.loads(body)
 
 
 # --- refusal ----------------------------------------------------------------

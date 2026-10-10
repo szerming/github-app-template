@@ -21,5 +21,6 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "datamodel-code-generator>=0.83.0",
     "pytest>=9.1.1",
 ]
