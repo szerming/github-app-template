@@ -1,0 +1,53 @@
+# The gate: static checks, then the hermetic suite, on every commit.
+#
+# Both commands are the developer's own entry points -- `uv run poe check` and
+# `uv run poe test` -- so CI runs what a developer runs by hand, and the suite
+# starts the service through scripts/start.sh exactly as the operator does.
+# Nothing here is CI-only, and nothing here needs the network.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A branch pushed twice while a run is in flight only needs the newest verdict;
+# the superseded run's result is noise.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-and-test:
+    name: check and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Pinned exactly, like the lockfile, the vendored description and the
+      # generated models: the same uv locally and in CI keeps `uv sync --locked`
+      # and the ruff version the formatter check asserts against identical.
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+
+      # --locked, not --frozen: a lockfile that no longer matches pyproject.toml
+      # fails here instead of being silently re-resolved in CI. Python 3.13 comes
+      # from .python-version, which uv reads and installs itself.
+      - name: Sync the locked environment
+        run: uv sync --locked
+
+      - name: Check (ruff lint and format)
+        run: uv run poe check
+
+      # Runs even when the check failed, so one round trip reports both verdicts.
+      - name: Test (pytest)
+        if: ${{ !cancelled() }}
+        run: uv run poe test
