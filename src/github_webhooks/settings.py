@@ -23,13 +23,15 @@ class Settings(BaseSettings):
 
 
 def load_settings() -> Settings:
-    """Build the settings, refusing to start when the secret is absent.
+    """Build the settings, refusing to start without a usable secret.
 
     A misconfigured deployment has to fail at startup, naming the variable it is
-    missing, rather than accept whatever arrives.
+    missing, rather than accept whatever arrives. An empty secret counts as
+    absent: it would make every signature forgeable, so nothing would tell a
+    delivery from a forgery.
     """
     try:
-        return Settings()
+        settings = Settings()
     except ValidationError as exc:
         missing = [
             str(error["loc"][0]) for error in exc.errors() if error["type"] == "missing"
@@ -40,3 +42,9 @@ def load_settings() -> Settings:
                 + ", ".join(missing)
             ) from exc
         raise
+    if not settings.webhook_secret:
+        raise SystemExit(
+            "refusing to start: WEBHOOK_SECRET is set but empty, so no delivery "
+            "could be told from a forgery"
+        )
+    return settings

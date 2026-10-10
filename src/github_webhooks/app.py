@@ -42,6 +42,14 @@ def _compact(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
+def _log_refusal(rejected: str, **fields: Any) -> None:
+    logger.warning("{}", _compact({"rejected": rejected, **fields}))
+
+
+def _log_delivery(record: dict[str, Any]) -> None:
+    logger.info("{}", _compact(record))
+
+
 def _configure_logging(settings: Settings) -> None:
     logger.remove()
     logger.add(sys.stderr, level=settings.log_level.upper(), format="{level}: {message}")
@@ -98,47 +106,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         event_type = request.headers.get(EVENT_TYPE_HEADER.lower(), "")
 
         signature = request.headers.get(signing.SIGNATURE_HEADER.lower())
+        legacy = request.headers.get(signing.LEGACY_SIGNATURE_HEADER.lower())
         if not signing.signature_is_valid(settings.webhook_secret, body, signature):
-            legacy = request.headers.get(signing.LEGACY_SIGNATURE_HEADER.lower())
-            if signing.is_legacy_signature(legacy):
-                logger.warning(
-                    "{}",
-                    _compact(
-                        {
-                            "rejected": REJECTED_LEGACY_SHA1,
-                            "delivery_id": delivery_id,
-                            "reason": (
-                                "the deprecated sha1 signature scheme is not "
-                                "accepted; reconfigure the webhook to sha256"
-                            ),
-                        }
+            # Keyed on the sha256 header being absent, not merely on the legacy
+            # one being present: otherwise a forgery that also sends a sha1
+            # header wears the benign label and a real attack reads as a stale
+            # configuration.
+            if signing.is_legacy_signature(legacy) and signature is None:
+                _log_refusal(
+                    REJECTED_LEGACY_SHA1,
+                    delivery_id=delivery_id,
+                    reason=(
+                        "the deprecated sha1 signature scheme is not accepted; "
+                        "reconfigure the webhook to sha256"
                     ),
                 )
             else:
-                logger.warning(
-                    "{}",
-                    _compact(
-                        {
-                            "rejected": REJECTED_INVALID_SIGNATURE,
-                            "delivery_id": delivery_id,
-                            "reason": "signature missing or not verified",
-                        }
-                    ),
+                _log_refusal(
+                    REJECTED_INVALID_SIGNATURE,
+                    delivery_id=delivery_id,
+                    reason="signature missing or not verified",
                 )
             return Response(status_code=401)
 
         content_type = request.headers.get("content-type", "")
         if not _is_json_content_type(content_type):
-            logger.warning(
-                "{}",
-                _compact(
-                    {
-                        "rejected": REJECTED_NON_JSON_CONTENT_TYPE,
-                        "delivery_id": delivery_id,
-                        "content_type": content_type,
-                        "raw_body": _raw_text(body),
-                    }
-                ),
+            _log_refusal(
+                REJECTED_NON_JSON_CONTENT_TYPE,
+                delivery_id=delivery_id,
+                content_type=content_type,
+                raw_body=_raw_text(body),
             )
             return Response(status_code=415)
 
@@ -158,7 +155,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # The payload is the product of V1: written even though nothing consumes
         # it yet. A body that is not JSON is logged raw rather than dropped.
         record["payload"] = payload if payload is not None else _raw_text(body)
-        logger.info("{}", _compact(record))
+        _log_delivery(record)
 
         return Acknowledgement(
             delivery_id=delivery_id,

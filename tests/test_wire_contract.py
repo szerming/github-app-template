@@ -74,26 +74,28 @@ def test_published_signature_vector_is_recomputed_and_accepted(service: Service)
 
 
 def test_a_signed_delivery_is_answered_202_naming_the_delivery(service: Service) -> None:
-    status, ack = service.deliver(
-        issue_payload(), event_type="issues", delivery_id="ack-1"
+    status, acknowledgement = service.deliver(
+        issue_payload(), event_type="issues", delivery_id="accepted-1"
     )
 
     assert status == 202
-    assert ack["delivery_id"] == "ack-1"
-    assert ack["event_type"] == "issues"
-    assert ack["action"] == "opened"
+    assert acknowledgement["delivery_id"] == "accepted-1"
+    assert acknowledgement["event_type"] == "issues"
+    assert acknowledgement["action"] == "opened"
     # Nothing is typed yet, and that is the permanent fallback, not a stub.
-    assert ack["modelled"] is False
+    assert acknowledgement["modelled"] is False
     # No timestamp: a response a test can assert exactly.
-    assert "timestamp" not in ack
+    assert "timestamp" not in acknowledgement
 
 
 def test_the_acknowledgement_omits_the_action_when_there_is_none(service: Service) -> None:
-    status, ack = service.deliver(push_payload(), event_type="push", delivery_id="ack-2")
+    status, acknowledgement = service.deliver(
+        push_payload(), event_type="push", delivery_id="accepted-2"
+    )
 
     assert status == 202
-    assert ack["modelled"] is False
-    assert "action" not in ack
+    assert acknowledgement["modelled"] is False
+    assert "action" not in acknowledgement
 
 
 # --- refusal ----------------------------------------------------------------
@@ -170,6 +172,33 @@ def test_the_legacy_sha1_header_is_refused_and_logged_distinctly(service: Servic
     assert legacy_reasons.isdisjoint(forgery_reasons)
 
 
+def test_a_forgery_cannot_wear_the_legacy_label(service: Service) -> None:
+    """A sha1 header beside a failed sha256 check is a forgery, not a stale config.
+
+    Otherwise the classification is attacker-selectable: a forger adds a benign
+    sha1 header and a real attack reads as a misconfiguration.
+    """
+    status, _ = service.request(
+        "POST",
+        "/",
+        issue_payload(),
+        {
+            SIGNATURE_HEADER: "sha256=" + "1" * 64,
+            LEGACY_SIGNATURE_HEADER: "sha1=" + "2" * 40,
+            "Content-Type": JSON_CONTENT_TYPE,
+            DELIVERY_ID_HEADER: "refuse-both-headers",
+        },
+    )
+
+    assert status == 401
+    reasons = {
+        record["rejected"]
+        for record in service.refused()
+        if record.get("delivery_id") == "refuse-both-headers"
+    }
+    assert reasons == {"invalid-signature"}
+
+
 def test_a_signature_header_with_a_non_ascii_byte_is_refused(service: Service) -> None:
     status, _ = service.request(
         "POST",
@@ -217,10 +246,12 @@ def test_an_unsigned_non_json_delivery_is_refused_at_the_signature(service: Serv
 
 
 def test_a_body_that_is_not_json_is_accepted_and_logged_raw(service: Service) -> None:
-    status, ack = service.deliver(PUBLISHED_BODY, event_type="push", delivery_id="raw-1")
+    status, acknowledgement = service.deliver(
+        PUBLISHED_BODY, event_type="push", delivery_id="raw-1"
+    )
 
     assert status == 202
-    assert ack["modelled"] is False
+    assert acknowledgement["modelled"] is False
     records = service.accepted_for("raw-1")
     assert len(records) == 1
     assert records[0]["payload"] == PUBLISHED_BODY.decode()
