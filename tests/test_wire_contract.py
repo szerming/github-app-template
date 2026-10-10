@@ -8,7 +8,6 @@ import json
 
 from conftest import (
     DELIVERY_ID_HEADER,
-    EVENT_TYPE_HEADER,
     JSON_CONTENT_TYPE,
     LEGACY_SIGNATURE_HEADER,
     SIGNATURE_HEADER,
@@ -167,9 +166,7 @@ def test_a_delivery_outside_the_typed_events_is_logged_raw(service: Service) -> 
     # No model was tried, so none is named, and this is not a validation failure.
     assert "model" not in records[0]
     assert [
-        record
-        for record in service.refused()
-        if record.get("delivery_id") == "unmodelled-1"
+        record for record in service.refused() if record.get("delivery_id") == "unmodelled-1"
     ] == []
 
 
@@ -191,9 +188,7 @@ def test_a_payload_a_model_cannot_type_is_accepted_and_warned_about(service: Ser
 
     # The raw body is all that is left of a delivery no model could type, so it
     # is in the warning and in the record.
-    warnings = [
-        record for record in service.refused() if record.get("delivery_id") == "gap-1"
-    ]
+    warnings = [record for record in service.refused() if record.get("delivery_id") == "gap-1"]
     assert len(warnings) == 1
     assert warnings[0]["unmodelled"] == "validation-failed"
     assert "WebhookPush" in warnings[0]["error"]
@@ -209,9 +204,7 @@ def test_a_payload_a_model_cannot_type_is_accepted_and_warned_about(service: Ser
 
 
 def test_no_signature_header_is_refused(service: Service) -> None:
-    status, _ = service.deliver(
-        issue_payload(), signature=False, delivery_id="refuse-missing"
-    )
+    status, _ = service.deliver(issue_payload(), signature=False, delivery_id="refuse-missing")
     assert status == 401
 
 
@@ -332,11 +325,7 @@ def test_a_non_json_content_type_is_refused_after_the_signature_check(service: S
     )
 
     assert status == 415
-    logged = [
-        record
-        for record in service.refused()
-        if record.get("delivery_id") == "ct-form"
-    ]
+    logged = [record for record in service.refused() if record.get("delivery_id") == "ct-form"]
     assert logged
     assert logged[-1]["raw_body"] == body.decode()
 
@@ -369,9 +358,7 @@ def test_a_body_that_is_not_json_is_accepted_and_logged_raw(service: Service) ->
 
 def test_exactly_one_log_record_per_delivery_carrying_the_payload(service: Service) -> None:
     body = issue_payload(number=42)
-    status, _ = service.deliver(
-        body, event_type=UNDOCUMENTED_EVENT_TYPE, delivery_id="log-1"
-    )
+    status, _ = service.deliver(body, event_type=UNDOCUMENTED_EVENT_TYPE, delivery_id="log-1")
 
     assert status == 202
     records = service.accepted_for("log-1")
@@ -389,9 +376,7 @@ def test_exactly_one_log_record_per_delivery_carrying_the_payload(service: Servi
 def test_the_log_record_is_one_compact_single_line_of_json(service: Service) -> None:
     service.deliver(issue_payload(number=99), event_type="issues", delivery_id="compact-1")
 
-    lines = [
-        line for line in service.log_lines() if '"delivery_id":"compact-1"' in line
-    ]
+    lines = [line for line in service.log_lines() if '"delivery_id":"compact-1"' in line]
     assert len(lines) == 1
 
     line = lines[0]

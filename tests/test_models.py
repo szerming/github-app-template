@@ -98,7 +98,9 @@ def test_every_published_example_is_typed_or_recorded_as_unmodelled():
         event = parse_event(event_type, action, json.loads(example_payload(entry)))
         (typed if event.modelled else unmodelled).append((event_type, action))
 
-    report = f"{len(typed)}/{len(examples())} published examples typed, {len(unmodelled)} unmodelled"
+    report = (
+        f"{len(typed)}/{len(examples())} published examples typed, {len(unmodelled)} unmodelled"
+    )
     print(report)
 
     assert len(typed) + len(unmodelled) == len(examples())
@@ -194,9 +196,7 @@ def test_every_generated_field_is_optional():
     assert models
 
     for model in models:
-        required = sorted(
-            name for name, field in model.model_fields.items() if field.is_required()
-        )
+        required = sorted(name for name, field in model.model_fields.items() if field.is_required())
         assert not required, f"{model.__name__} requires {required}"
 
 

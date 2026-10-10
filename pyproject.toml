@@ -22,5 +22,34 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "datamodel-code-generator>=0.83.0",
+    "poethepoet>=0.48.0",
     "pytest>=9.1.1",
+    "ruff>=0.17.0",
 ]
+
+[tool.poe.tasks]
+# The one entry point for the developer's loop: `uv run poe <task>`.
+test = "pytest"
+lint = "ruff check ."
+format = "ruff format ."
+format-check = "ruff format --check ."
+check = { sequence = ["lint", "format-check"] }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = [
+    # Byte-reproducible build artifact: tests/test_generation.py asserts the
+    # committed file is byte-identical to the generator's output, so neither
+    # the linter nor the formatter may rewrite it.
+    "src/github_webhooks/models/generated.py",
+    # Vendored upstream material, kept exactly as published.
+    "vendor",
+    "docs_github",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

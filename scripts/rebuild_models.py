@@ -58,8 +58,7 @@ UPSTREAM_PATH = "packages/openapi-webhooks/generated/api.github.com.json"
 UPSTREAM_REVISION = "d9af91f9ddbad97e5b5765d4b5931c75063c7e22"
 UPSTREAM_DIGEST = "375906eeeace26486c6aecf5869a5e5ad4bba72c6571481ef54fa8c1cada3aae"
 UPSTREAM_URL = (
-    f"https://raw.githubusercontent.com/{UPSTREAM_REPOSITORY}"
-    f"/{UPSTREAM_REVISION}/{UPSTREAM_PATH}"
+    f"https://raw.githubusercontent.com/{UPSTREAM_REPOSITORY}/{UPSTREAM_REVISION}/{UPSTREAM_PATH}"
 )
 
 # Formats that would make a model stricter than GitHub's own documentation.
@@ -304,9 +303,7 @@ def reduced_document(
         # ``_flatten_payload_unions`` both edit them in place, and the
         # description they were read from has to survive being asked for its
         # facts afterwards.
-        "components": {
-            "schemas": {name: copy.deepcopy(schemas[name]) for name in sorted(closure)}
-        },
+        "components": {"schemas": {name: copy.deepcopy(schemas[name]) for name in sorted(closure)}},
     }
     _flatten_payload_unions(
         reduced["components"]["schemas"], (delivery.component for delivery in facts.values())
@@ -395,6 +392,13 @@ def generate_models(document: dict[str, Any]) -> str:
         target_python_version="3.13",
         base_class="github_webhooks.models.events.Event",
         formatters=["builtin"],
+        # Pin the line length explicitly. The builtin formatter otherwise reads
+        # the project's pyproject.toml and honours -- in order -- ``[tool.ruff]
+        # line-length``, ``[tool.black]`` or ``[tool.isort]``. A lint rule meant
+        # for the hand-written code would then silently reflow the artifact and
+        # break the byte-for-byte reproducibility test, so the generator states
+        # its own width instead of inheriting one.
+        builtin_format_line_length=88,
         use_annotated=False,
     )
     if not isinstance(code, str):  # pragma: no cover - a single module was asked for
@@ -428,8 +432,7 @@ def pin_actions(code: str, facts: Mapping[str, PublishedDelivery]) -> str:
             continue
         if current is not None and current in wanted and line.startswith(_ACTION_ANNOTATION):
             lines[index] = (
-                f'    action: Literal["{wanted[current]}"] | None'
-                + line[len(_ACTION_ANNOTATION) :]
+                f'    action: Literal["{wanted[current]}"] | None' + line[len(_ACTION_ANNOTATION) :]
             )
             pinned.add(current)
     unpinned = sorted(set(wanted) - pinned)
@@ -452,7 +455,11 @@ def _ensure_import(code: str, name: str) -> str:
     if name in names:
         return code
     names.append(name)
-    return code[: match.start()] + f"from typing import {', '.join(sorted(names))}" + code[match.end() :]
+    return (
+        code[: match.start()]
+        + f"from typing import {', '.join(sorted(names))}"
+        + code[match.end() :]
+    )
 
 
 def dispatch_table(facts: Mapping[str, PublishedDelivery]) -> str:
@@ -461,11 +468,7 @@ def dispatch_table(facts: Mapping[str, PublishedDelivery]) -> str:
         f'    "{delivery.dispatch_key}": {delivery.class_name},'
         for delivery in sorted(facts.values(), key=lambda delivery: delivery.dispatch_key)
     )
-    return (
-        "\n\nDISPATCH: dict[str, type[Event]] = {\n"
-        f"{rows}\n"
-        "}\n"
-    )
+    return f"\n\nDISPATCH: dict[str, type[Event]] = {{\n{rows}\n}}\n"
 
 
 def assert_classes_exist(code: str, facts: Mapping[str, PublishedDelivery]) -> None:
@@ -527,7 +530,9 @@ def rebuild(document: dict[str, Any], digest: str) -> str:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Rebuild the payload models from GitHub's description.")
+    parser = argparse.ArgumentParser(
+        description="Rebuild the payload models from GitHub's description."
+    )
     source = parser.add_mutually_exclusive_group()
     source.add_argument(
         "--description",
@@ -539,7 +544,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help=f"read the vendored description ({DESCRIPTION_PATH.relative_to(REPO_ROOT)})",
     )
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="where to write the artifact")
+    parser.add_argument(
+        "--output", type=Path, default=DEFAULT_OUTPUT, help="where to write the artifact"
+    )
     return parser.parse_args(argv)
 
 

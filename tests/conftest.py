@@ -22,8 +22,9 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
 
@@ -113,7 +114,6 @@ def rebuild_module() -> Any:
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
-
 
 
 def sign(secret: str, body: bytes) -> str:

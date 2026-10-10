@@ -33,13 +33,10 @@ def load_settings() -> Settings:
     try:
         settings = Settings()
     except ValidationError as exc:
-        missing = [
-            str(error["loc"][0]) for error in exc.errors() if error["type"] == "missing"
-        ]
+        missing = [str(error["loc"][0]) for error in exc.errors() if error["type"] == "missing"]
         if missing:
             raise SystemExit(
-                "refusing to start: missing required environment variable(s): "
-                + ", ".join(missing)
+                "refusing to start: missing required environment variable(s): " + ", ".join(missing)
             ) from exc
         raise
     if not settings.webhook_secret:
