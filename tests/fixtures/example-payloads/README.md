@@ -9,7 +9,7 @@ named after the event header.
     revision    049c104cd2198f5c04acf4ee806b56d2d8fd1e76
     path        payload-examples/api.github.com
     licence     MIT
-    273 example payloads across 59 event types
+    273 example payloads across 60 event types
 
 Vendor (or re-vendor) them with:
 

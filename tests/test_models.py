@@ -40,29 +40,23 @@ from github_webhooks.models import (
 # The description is pinned, so how much it carries is a fact rather than a
 # filter: every key GitHub documents is modelled, not a chosen subset.
 PUBLISHED_KEYS = 274
+PUBLISHED_EVENT_TYPES = 76
 
-# The published examples the models do not type, and there are three causes:
+# The published examples the models do not type, and there are two causes:
 #
 #   * ``check_run.rerequested`` -- the example carries naive timestamps, and a
-#     timestamp is timezone-aware (spec 0001, user story 23);
-#   * ``projects_v2_item.*`` -- the description's own header example for these
-#     reads ``project-v2-item`` while GitHub sends ``projects_v2_item``, so the
-#     delivery dispatches to a key no model covers;
+#     timestamp is timezone-aware (spec 0001, user story 23). Two files, so the
+#     run reports three unmodelled examples across two delivery keys;
 #   * ``repository_dispatch.on-demand-test`` -- the description leaves
 #     repository_dispatch's action open, because it is the caller's own event type.
 #
-# Reporting them is the point -- coverage is a number, not an opinion -- and every
-# one is a delivery the lens records rather than refuses (ADR 0001).
+# Reporting them is the point -- coverage is a number, not an opinion -- and both
+# are deliveries the lens records rather than refuses (ADR 0001).
 EXPECTED_UNMODELLED = {
     ("check_run", "rerequested"),
-    ("projects_v2_item", "archived"),
-    ("projects_v2_item", "converted"),
-    ("projects_v2_item", "created"),
-    ("projects_v2_item", "edited"),
-    ("projects_v2_item", "reordered"),
-    ("projects_v2_item", "restored"),
     ("repository_dispatch", "on-demand-test"),
 }
+UNMODELLED_EXAMPLES = 3
 
 MODELS_PACKAGE = REPO_ROOT / "src" / "github_webhooks" / "models"
 
@@ -109,6 +103,8 @@ def test_every_published_example_is_typed_or_recorded_as_unmodelled():
 
     assert len(typed) + len(unmodelled) == len(examples())
     assert typed, "no published example was typed"
+    # Both the count and the keys: a duplicate fixture must not hide inside a set.
+    assert len(unmodelled) == UNMODELLED_EXAMPLES
     assert set(unmodelled) == EXPECTED_UNMODELLED
 
 
@@ -127,6 +123,7 @@ def test_every_key_the_description_publishes_resolves_to_a_real_model_class():
 
     assert len(document["webhooks"]) == PUBLISHED_KEYS
     assert len(facts) == PUBLISHED_KEYS
+    assert len({delivery.event_type for delivery in facts.values()}) == PUBLISHED_EVENT_TYPES
 
     for key, delivery in facts.items():
         model = getattr(generated, delivery.class_name, None)
@@ -154,6 +151,31 @@ def test_the_artifact_carries_a_class_for_every_shape_a_delivery_can_reach():
     assert reachable == set(schemas)
     for component in sorted(reachable):
         assert f"class {module.class_name(component)}(" in artifact, component
+
+
+def test_generation_excludes_a_shape_no_delivery_can_reach():
+    """The scoping mechanism, on a description where it has something to exclude.
+
+    Story 28 asks for the artifact to carry the webhook models rather than the
+    REST API surface. At the pinned revision every published shape is reachable
+    from some delivery, so the property cannot be observed on the vendored
+    description; a REST-only shape is added to a copy instead, and the reduced
+    description has to leave it out.
+    """
+    module = rebuild_module()
+    document = description()
+    facts = module.dispatch_facts(document)
+    rest_only = "a-shape-only-the-rest-api-uses"
+    document["components"]["schemas"][rest_only] = {
+        "type": "object",
+        "properties": {"id": {"type": "integer"}},
+    }
+    reachable = module.schema_closure(document, (delivery.component for delivery in facts.values()))
+    assert rest_only not in reachable
+
+    reduced = module.reduced_document(document, facts)
+
+    assert set(reduced["components"]["schemas"]) == reachable
 
 
 # --- the lens, not the gate -------------------------------------------------
@@ -279,6 +301,11 @@ def test_the_models_import_nothing_from_the_application():
     """A property of the code, not a seam: the typing has to be usable without
     running the service (spec 0001, user story 38), so the models package may
     import only from inside itself.
+
+    Absolute imports of the application (``github_webhooks.app`` and anything else
+    outside ``github_webhooks.models``, including a bare ``github_webhooks``) and
+    relative imports that climb out of the package (``from ..app import x``) are
+    both offences.
     """
     modules = sorted(MODELS_PACKAGE.glob("*.py"))
     assert modules
@@ -288,15 +315,22 @@ def test_the_models_import_nothing_from_the_application():
         tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                imported = [alias.name for alias in node.names]
+                names = [alias.name for alias in node.names]
             elif isinstance(node, ast.ImportFrom):
-                imported = [node.module or ""]
+                if node.level >= 2:  # climbs out of github_webhooks.models
+                    offenders.append((module.name, "." * node.level + (node.module or "")))
+                    continue
+                names = [node.module or ""] if node.level == 0 else []
             else:
                 continue
-            for name in imported:
-                if name.startswith("github_webhooks.") and not name.startswith(
-                    "github_webhooks.models"
-                ):
+            for name in names:
+                if _imports_the_application(name):
                     offenders.append((module.name, name))
 
     assert offenders == []
+
+
+def _imports_the_application(name: str) -> bool:
+    return name == "github_webhooks" or (
+        name.startswith("github_webhooks.") and not name.startswith("github_webhooks.models")
+    )

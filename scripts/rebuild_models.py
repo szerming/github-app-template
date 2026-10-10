@@ -16,11 +16,14 @@ payloads (ADR 0002). Everything this script writes is derived from it:
   ``discriminator`` and keys payloads by event+action, so the mapping is ours and
   is emitted here rather than hand-maintained beside the models.
 
-Three transformations are applied to the description before generation, each one
+Four transformations are applied to the description before generation, each one
 a decision recorded in the spec rather than a convenience:
 
-- generation is scoped to the reference closure of the scoped deliveries'
-  request bodies, so REST-API-only shapes are absent from the artifact;
+- generation is scoped to the reference closure of the deliveries' request
+  bodies, so REST-API-only shapes are absent from the artifact;
+- a payload schema expressed as a ``oneOf`` is flattened to one all-optional
+  object, because a union payload is not an ``Event`` the dispatcher can build
+  (see :func:`_flatten_payload_unions`);
 - ``enum`` and ``const`` are dropped, so no generated model can refuse a value
   GitHub adds later;
 - the ``uri``/``uri-template``/``email`` formats are dropped, so a URL stays a
@@ -36,6 +39,7 @@ rather than emitting an artifact that quietly lost the property.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import re
@@ -111,7 +115,6 @@ def verify_digest(content: bytes, origin: str) -> str:
 class PublishedDelivery:
     """One delivery from the description, and what the generated code needs."""
 
-    webhook_key: str
     event_type: str
     action: str | None
     component: str
@@ -136,10 +139,10 @@ def dispatch_facts(document: dict[str, Any]) -> dict[str, PublishedDelivery]:
 
     Every key the description carries is read, not a chosen subset: the artifact
     types every delivery GitHub documents (spec 0001, user story 18). The event
-    type is the value GitHub's own ``X-Github-Event`` header example carries --
-    ``pull-request`` in the key is ``pull_request`` in the header -- and the
-    action is the single value the payload schema enumerates, so both come from
-    the description rather than from a table kept beside it.
+    type and the action both come from the description rather than from a table
+    kept beside it -- the event type from the description's own event-type name
+    (:func:`_event_type`), the action from the single value the payload schema
+    enumerates.
     """
     webhooks = document.get("webhooks", {})
     if not webhooks:
@@ -149,11 +152,10 @@ def dispatch_facts(document: dict[str, Any]) -> dict[str, PublishedDelivery]:
         operation = item.get("post")
         if not isinstance(operation, dict):
             raise SystemExit(f"the {key!r} webhook has no POST operation")
-        event_type = _header_example(operation, "X-Github-Event")
+        event_type = _event_type(operation, key)
         component = _request_body_ref(operation, key)
         action = _action_literal(document, component, key)
         facts[key] = PublishedDelivery(
-            webhook_key=key,
             event_type=event_type,
             action=action,
             component=component,
@@ -163,17 +165,30 @@ def dispatch_facts(document: dict[str, Any]) -> dict[str, PublishedDelivery]:
     return facts
 
 
+def _event_type(operation: dict[str, Any], key: str) -> str:
+    """The event type GitHub sends in ``X-Github-Event`` for a delivery.
 
-def _header_example(operation: dict[str, Any], name: str) -> str:
-    for parameter in operation.get("parameters", []):
-        if str(parameter.get("name", "")).lower() == name.lower():
-            example = parameter.get("example")
-            if isinstance(example, str) and example:
-                return example
-    raise SystemExit(
-        f"the {name!r} header example is missing from a scoped webhook: the "
-        "event type in the dispatch key would be a guess"
-    )
+    The description spells it twice: in the ``X-Github-Event`` header *example*
+    and in the ``x-github.subcategory`` the Octokit SDKs group by. The example is
+    a free-text sample and is misspelled for four families -- ``project-v2-item``
+    for ``projects_v2_item``, ``project-v2`` for ``projects_v2``,
+    ``project-v2-status-update`` for ``projects_v2_status_update`` and
+    ``discussions`` for ``discussion`` -- which would key 17 deliveries to event
+    types GitHub never sends, leaving their models unreachable. The subcategory is
+    the description's own event-type name and is present on every operation; its
+    hyphenated slugs are normalised to the underscore form every real header uses.
+    This is where the event type comes from rather than the header example: the
+    spec named the example, but the example contradicts the header convention the
+    spec rests on (``pull-request`` in the key is ``pull_request`` in the header),
+    and only this source yields the 76 event types the description documents.
+    """
+    subcategory = operation.get("x-github", {}).get("subcategory")
+    if not isinstance(subcategory, str) or not subcategory:
+        raise SystemExit(
+            f"the {key!r} webhook carries no x-github.subcategory: the event type "
+            "in the dispatch key would be a guess"
+        )
+    return subcategory.replace("-", "_")
 
 
 def _request_body_ref(operation: dict[str, Any], key: str) -> str:
@@ -285,7 +300,13 @@ def reduced_document(
         # The ``webhooks`` object contributes no code -- datamodel-codegen emits
         # models from ``components/schemas`` alone -- so it is dropped here and
         # the dispatch table is emitted from the facts read above.
-        "components": {"schemas": {name: schemas[name] for name in sorted(closure)}},
+        # The shapes are copied before they are rewritten: ``_loosen`` and
+        # ``_flatten_payload_unions`` both edit them in place, and the
+        # description they were read from has to survive being asked for its
+        # facts afterwards.
+        "components": {
+            "schemas": {name: copy.deepcopy(schemas[name]) for name in sorted(closure)}
+        },
     }
     _flatten_payload_unions(
         reduced["components"]["schemas"], (delivery.component for delivery in facts.values())
@@ -356,7 +377,7 @@ def _enum_type(values: Any) -> str:
 
 
 def generate_models(document: dict[str, Any]) -> str:
-    """Run datamodel-codegen over the scoped description."""
+    """Run datamodel-codegen over the reduced description."""
     from datamodel_code_generator import DataModelType, InputFileType, generate
 
     code = generate(
