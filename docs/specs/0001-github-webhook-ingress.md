@@ -29,7 +29,7 @@ In scope for V1:
 - Generated, owned pydantic models covering every documented event type, with dispatch on the delivery's event header plus the payload's action.
 - An Unmodelled Event path: accepted, raw payload retained, never a refusal.
 - One log record per delivery, carrying the payload.
-- A typed acknowledgement, and the settings and scripts needed to run and rebuild the whole thing.
+- A typed acknowledgement; the settings and scripts needed to run the service, rebuild the models, and drive real deliveries at it locally.
 
 Out of scope for V1 is in its own section below.
 
@@ -99,6 +99,11 @@ Testing:
 42. As a developer, I want a structural test asserting every key in the published description resolves to a class, so that a generation which silently dropped a shape fails the build.
 43. As a developer, I want the example payloads vendored rather than fetched, so that the tests do not depend on the network.
 
+Driving it locally:
+
+44. As a developer, I want one command that forwards live GitHub events to the local service, so that I can watch real deliveries arrive without deploying anything.
+45. As a developer, I want that forwarding loop to sign with the same secret the service verifies with, so that a forwarded delivery exercises the verification path instead of being refused by it.
+
 ## Implementation Decisions
 
 Delivery handling is a fixed order, and each step is a decision rather than an accident: read the raw bytes, verify, check the content type, parse leniently, dispatch, validate, log, acknowledge.
@@ -141,18 +146,20 @@ Structure:
 
 - Modules: a settings module, the application, a signing module, and a models package holding the generated models, the generated registry, and the re-exported entry point.
 - `parse_event(event_type, action, payload)` returning the typed event is the single front door. Nothing else calls it yet.
-- One start script and one rebuild script. The console script entry point is removed: two ways to start the service is one too many, and the tests drive the script.
+- Three scripts: one to start the service, one to rebuild the models, and one to forward live GitHub events to the local service. The console script entry point is removed: two ways to start the service is one too many, and the tests drive the script.
 
 ## Testing Decisions
 
 What makes a good test here: it asserts external behaviour only — status codes returned and lines written to the log — and never imports the application's internals to inspect them. A test coupled to the handler's shape breaks on every refactor and proves nothing about the wire.
 
-Seams — proposed, and the one thing in this spec I want confirmed rather than assumed:
+Test seams: settled, and there are two.
 
 1. The running service, started as a real process on a free port through the start script. This is the highest seam and carries the whole wire contract: signature acceptance and refusal, the content-type gate, the acknowledgement's shape and status, and what the log says for each case. A readiness probe against the health endpoint is part of the harness, not decoration.
 2. The models package, exercised directly through its entry point, for the two claims that are about model fidelity rather than wire behaviour: that every published example payload validates against the model it dispatches to, and that every key in the published description resolves to a class.
 
-Two seams rather than one, and the cost of that is stated plainly: the acceptance criterion for "the models are right" is a count over hundreds of fixtures, and asserting it through HTTP would mean computing a signature and scraping a log line per fixture to reach the same fact. A source scan asserting that the models import nothing from the application is not a seam; it is a property of the code, and it says so in its docstring.
+Two seams rather than one, with the cost stated plainly: the acceptance criterion for "the models are right" is a count over hundreds of fixtures, and asserting it through HTTP would mean computing a signature and scraping a log line per fixture to reach the same fact. A source scan asserting that the models import nothing from the application is not a seam; it is a property of the code, and it says so in its docstring.
+
+The local delivery loop is not a test and is never the gate. Forwarding live events to the running service is how a human demonstrates a slice against real GitHub traffic; it needs an active GitHub session and something to actually happen on a repository, so it cannot run in CI. The hermetic suite is the gate; the loop is the demo, and the real payloads it delivers are what settle the open question in ADR 0001.
 
 No separate signing seam: signing is tested through the process, which is where its behaviour is observable and where a malformed header's 401-instead-of-500 is a real difference.
 
@@ -179,3 +186,5 @@ One consequence of logging inline: the effect is present the moment the POST ret
 - Field-level required information is discarded by the generation decision. The published description remains the only record of which fields GitHub always sends, and that is a real cost accepted in exchange for never refusing a delivery over it.
 - No ADR was written for dispatching on the event header rather than building a discriminated union on the action. That choice fails the hard-to-reverse test — it is confined to the models package and cheap to change — and it is recorded as a consequence of ADR 0002 instead, because it follows from the chosen source having no discriminator.
 - The URL types and enums that would make these models prettier are deliberately absent. A URL field that GitHub populates with a non-HTTP scheme, or an enum that meets a value added after generation, converts a typing convenience into a rejected delivery.
+- The local delivery loop forwards **live** events only, so something has to happen on a repository for it to forward anything, and it cannot be an automated test. One delivery in the fixture set is out of its reach: GitHub does not let you approve your own pull request, so a review approval needs a second account — which is the one case where the vendored example payload is the only coverage available.
+- The loop's local URL may be omitted, which prints the events instead of forwarding them. That is useful on its own for seeing what GitHub sends, and it is the fastest way to inspect a payload GitHub does not publish an example for.
